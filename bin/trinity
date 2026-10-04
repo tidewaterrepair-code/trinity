@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# THE BLACK WELL TRINITY — installer and maintenance toolkit.
+#
+# Safe by default: everything except `install`, `ui restore`, `ui guard` and
+# `access grant|revoke` is read-only toward production. Edge is never touched.
+set -Eeuo pipefail
+
+TRINITY_INSTALLER_HOME="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+export TRINITY_INSTALLER_HOME
+
+# shellcheck source=../lib/common.sh
+source "$TRINITY_INSTALLER_HOME/lib/common.sh"
+# shellcheck source=../lib/discover.sh
+source "$TRINITY_INSTALLER_HOME/lib/discover.sh"
+# shellcheck source=../lib/ui.sh
+source "$TRINITY_INSTALLER_HOME/lib/ui.sh"
+# shellcheck source=../lib/backup.sh
+source "$TRINITY_INSTALLER_HOME/lib/backup.sh"
+# shellcheck source=../lib/access.sh
+source "$TRINITY_INSTALLER_HOME/lib/access.sh"
+# shellcheck source=../lib/provision.sh
+source "$TRINITY_INSTALLER_HOME/lib/provision.sh"
+# shellcheck source=../lib/install.sh
+source "$TRINITY_INSTALLER_HOME/lib/install.sh"
+# shellcheck source=../lib/stage.sh
+source "$TRINITY_INSTALLER_HOME/lib/stage.sh"
+
+TRINITY_INSTALLER_VERSION="1.0.0"
+
+usage() {
+  cat <<EOF
+trinity ${TRINITY_INSTALLER_VERSION} — THE BLACK WELL TRINITY installer
+
+Existing installation (production is never modified by these):
+  preflight           host readiness and Edge fence check
+  protect             discover + preserve UI + provisioning export + proven backup
+  discover            read-only baseline manifest (source, runtime, schema, privileges, UI)
+  ui ...              preserve | verify | list | export | guard | restore
+  backup              recovery bundle with disposable restore proof
+  backup secrets      passphrase-encrypted secrets bundle (separate, off-host)
+  provisioning ...    export | compare runtime grant profiles
+  stage               isolated candidate: worktree + fresh-chain + upgrade proof (scratch only)
+
+Access:
+  access ...          grant | revoke | status   temporary audited maintenance SSH key
+
+New host:
+  install             fresh or recovery install (refuses if any installation exists)
+
+Global options (before the command):
+  --yes               answer typed confirmations (for unattended use)
+  --root DIR          installation root (default: $TRINITY_ROOT)
+  --state-dir DIR     where reports, snapshots and backups go (default: $TRINITY_STATE_DIR)
+
+Run 'trinity <command> --help' for details.
+EOF
+}
+
+preflight_run() {
+  local fail=0
+  log "host $(hostname), user $(id -un), installer $TRINITY_INSTALLER_VERSION"
+  local c
+  for c in git "$PYTHON" openssl tar sha256sum curl; do
+    if command -v "$c" >/dev/null 2>&1; then ok "found $c"; else warn "missing $c"; fail=1; fi
+  done
+  if docker_init 2>/dev/null; then
+    ok "docker $(dk version --format '{{.Server.Version}}') via ${_DOCKER_CMD[*]}"
+    dk compose version >/dev/null 2>&1 && ok "compose $(dk compose version --short)" || { warn "docker compose v2 missing"; fail=1; }
+  else
+    warn "docker daemon not reachable"; fail=1
+  fi
+  local avail
+  avail="$(df -Pk "$(dirname "$TRINITY_STATE_DIR")" 2>/dev/null | awk 'NR==2{print $4}')"
+  if [[ -n "$avail" ]]; then
+    if ((avail < 5 * 1024 * 1024)); then warn "less than 5 GiB free for backups ($((avail / 1024)) MiB)"; else ok "$((avail / 1024 / 1024)) GiB free for backups"; fi
+  fi
+  local existing; existing="$(install_detect_existing)"
+  if [[ -n "$existing" ]]; then
+    ok "existing installation detected:"; printf '%s\n' "$existing" | sed 's/^/    /' >&2
+    log "Edge fence: $(edge_fence_status)"
+    container_running "$TRINITY_WEB_CONTAINER" && ok "web container running (UI can be preserved)" || warn "web container not running"
+    container_running "$TRINITY_DB_CONTAINER" && ok "database container running" || warn "database container not running"
+  else
+    log "no installation on this host (fresh install possible)"
+  fi
+  return "$fail"
+}
+
+protect_run() {
+  local images=0
+  while (($#)); do
+    case "$1" in
+      --with-images) images=1 ;;
+      *) die "protect: unknown option $1" ;;
+    esac
+    shift
+  done
+  [[ -n "$(install_detect_existing)" ]] || die "no installation found to protect"
+  log "PROTECT: read-only discovery, UI snapshot, provisioning export and proven backup"
+  fence_begin
+  local d u p b
+  d="$(discover_run)"
+  u="$(ui_preserve)"
+  if container_running "$TRINITY_DB_CONTAINER"; then
+    p="$(provisioning_export --out "$d/runtime-provisioning.sql")"
+  fi
+  if ((images)); then b="$(backup_run --with-images)"; else b="$(backup_run)"; fi
+  fence_assert_unchanged
+  cat >&2 <<EOF
+
+==================== TRINITY PROTECTED ====================
+discovery report : $d/summary.txt
+UI snapshot      : $u
+provisioning     : ${p:-not exported (database not running)}
+backup           : $b
+restore proof    : $(cat "$b/db/restore-proof-result.txt" 2>/dev/null || echo n/a)
+Edge             : unchanged
+Production       : not modified
+===========================================================
+Next: copy the backup and UI snapshot OFF the VPS, and run
+  sudo trinity backup secrets --out /root/trinity-secrets-$(utc_stamp).enc
+EOF
+}
+
+main() {
+  while (($#)); do
+    case "$1" in
+      --yes) export TRINITY_ASSUME_YES=1 ;;
+      --root) TRINITY_ROOT="$2"; shift ;;
+      --state-dir) TRINITY_STATE_DIR="$2"; shift ;;
+      *) break ;;
+    esac
+    shift
+  done
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    preflight)     preflight_run "$@" ;;
+    protect)       protect_run "$@" ;;
+    discover)      discover_run "$@" ;;
+    ui)            ui_main "$@" ;;
+    backup)        backup_run "$@" ;;
+    provisioning)  provisioning_main "$@" ;;
+    stage)         stage_run "$@" ;;
+    access)        access_main "$@" ;;
+    install)       install_run "$@" ;;
+    version)       echo "$TRINITY_INSTALLER_VERSION" ;;
+    ""|-h|--help|help) usage ;;
+    *) die "unknown command: $cmd (see: trinity help)" ;;
+  esac
+}
+
+main "$@"

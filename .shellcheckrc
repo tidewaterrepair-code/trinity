@@ -1,0 +1,4 @@
+external-sources=true
+# Loop counters and flags set for sourced modules are intentional.
+disable=SC2034
+source-path=SCRIPTDIR
