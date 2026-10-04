@@ -33,13 +33,16 @@ _backup_db() {
   user="$(_db_env POSTGRES_USER)"; db="$(_db_env POSTGRES_DB)"
   [[ -n "$user" && -n "$db" ]] || die "cannot read POSTGRES_USER/POSTGRES_DB from $TRINITY_DB_CONTAINER"
   mkdir -p "$dir"
+  # Row counts are taken before and after the dump; the restore proof requires the
+  # restored counts to fall inside that window (production keeps writing meanwhile).
+  _db_exec_ro "$(_row_count_sql)" 600000 >"$dir/row-counts-before.txt"
   log "dumping database $db (custom format)"
   dk exec "$TRINITY_DB_CONTAINER" pg_dump -U "$user" -d "$db" -Fc --no-password >"$dir/database.dump"
   [[ -s "$dir/database.dump" ]] || die "pg_dump produced an empty file"
   dk exec "$TRINITY_DB_CONTAINER" pg_dumpall -U "$user" --roles-only --no-role-passwords >"$dir/roles.sql"
   dk exec -i "$TRINITY_DB_CONTAINER" pg_restore -l <"$dir/database.dump" >"$dir/dump-listing.txt"
   _db_exec_ro "SELECT version FROM blackwell.schema_migrations ORDER BY version" >"$dir/ledger.txt" 2>/dev/null || : >"$dir/ledger.txt"
-  _db_exec_ro "$(_row_count_sql)" >"$dir/row-counts.txt"
+  _db_exec_ro "$(_row_count_sql)" 600000 >"$dir/row-counts-after.txt"
   printf '%s\n%s\n' "$user" "$db" >"$dir/identity.txt"
   ok "database dumped: $(du -h "$dir/database.dump" | awk '{print $1}'), ledger rows $(wc -l <"$dir/ledger.txt" | tr -d ' ')"
 }
@@ -92,15 +95,36 @@ _restore_proof() {
   dk exec "$name" psql -X -At -U "$user" -d "$db" -c "SELECT version FROM blackwell.schema_migrations ORDER BY version" >"$dir/restore-ledger.txt" 2>/dev/null || : >"$dir/restore-ledger.txt"
   dk exec "$name" psql -X -At -U "$user" -d "$db" -c "$(_row_count_sql)" >"$dir/restore-row-counts.txt"
   cmp -s "$dir/ledger.txt" "$dir/restore-ledger.txt" || die "restore proof FAILED: migration ledger differs after restore"
-  # Production keeps changing while it is dumped; compare against the dump's
-  # own snapshot by re-counting only if counts differ.
-  if ! cmp -s "$dir/row-counts.txt" "$dir/restore-row-counts.txt"; then
-    diff "$dir/row-counts.txt" "$dir/restore-row-counts.txt" >"$dir/row-count-diff.txt" || true
-    warn "row counts moved between the count and the dump (live writes); see row-count-diff.txt"
-    echo "ROW_COUNTS_DIFFER_LIVE_WRITES" >"$dir/restore-proof-result.txt"
-  else
-    echo "PASS ledger=$(wc -l <"$dir/ledger.txt" | tr -d ' ') tables=$(wc -l <"$dir/row-counts.txt" | tr -d ' ')" >"$dir/restore-proof-result.txt"
-  fi
+  local verdict
+  verdict="$("$PYTHON" - "$dir/row-counts-before.txt" "$dir/row-counts-after.txt" "$dir/restore-row-counts.txt" <<'PY'
+import sys
+def load(p):
+    out = {}
+    for line in open(p):
+        if line.strip():
+            name, n = line.split()
+            out[name] = int(n)
+    return out
+before, after, restored = (load(p) for p in sys.argv[1:4])
+bad = []
+for t in sorted(set(before) | set(after) | set(restored)):
+    if t not in restored or t not in before or t not in after:
+        bad.append(f"{t}: table missing in one side")
+        continue
+    lo, hi = sorted((before[t], after[t]))
+    if not lo <= restored[t] <= hi:
+        bad.append(f"{t}: restored {restored[t]} outside [{lo},{hi}]")
+moved = sum(1 for t in before if t in after and before[t] != after[t])
+if bad:
+    print("FAIL " + "; ".join(bad[:10]))
+elif moved:
+    print(f"PASS tables={len(restored)} (live writes in {moved} table(s) during dump; restored counts within window)")
+else:
+    print(f"PASS tables={len(restored)} exact")
+PY
+)"
+  [[ "$verdict" == PASS* ]] || die "restore proof FAILED: $verdict"
+  echo "$verdict ledger=$(wc -l <"$dir/ledger.txt" | tr -d ' ')" >"$dir/restore-proof-result.txt"
   ok "restore proof: $(cat "$dir/restore-proof-result.txt")"
 }
 
@@ -165,6 +189,21 @@ _backup_images() {
   ok "images saved: ${#seen[@]}"
 }
 
+_backup_space_check() {
+  # Refuses to start if the backup could fill the disk (a full disk can stop PostgreSQL).
+  local dir="$1" with_data="$2" need=0 avail db_bytes data_bytes repo_bytes
+  db_bytes="$(_db_exec_ro "SELECT pg_database_size(current_database())" 2>/dev/null || echo 0)"
+  data_bytes=0; ((with_data)) && [[ -d "$TRINITY_ROOT/data" ]] && data_bytes="$(du -sb "$TRINITY_ROOT/data" | awk '{print $1}')"
+  repo_bytes="$(du -sb "$TRINITY_ROOT/.git" 2>/dev/null | awk '{print $1}' || echo 0)"
+  need=$(( (db_bytes + data_bytes + repo_bytes) * 2 + 2 * 1024 * 1024 * 1024 ))
+  avail="$(df -PB1 "$dir" | awk 'NR==2{print $4}')"
+  if ((avail < need)); then
+    rmdir "$dir" 2>/dev/null || true
+    die "not enough free space for a safe backup: need ~$((need / 1024 / 1024)) MiB (2x data + 2 GiB reserve), have $((avail / 1024 / 1024)) MiB at $(dirname "$dir")"
+  fi
+  log "free space ok: $((avail / 1024 / 1024)) MiB available, ~$((need / 1024 / 1024)) MiB reserved"
+}
+
 backup_run() {
   if [[ "${1:-}" == secrets ]]; then shift; backup_secrets "$@"; return; fi
   local with_images=0 with_data=1 proof=1
@@ -183,6 +222,7 @@ backup_run() {
   local root="$TRINITY_STATE_DIR/backups" stamp dir
   stamp="$(utc_stamp)"; dir="$root/$stamp"
   umask 077; mkdir -p "$dir"
+  _backup_space_check "$dir" "$with_data"
   log "backup: $dir"
   fence_begin
 

@@ -21,10 +21,10 @@ EOF
 _db_exec_ro() {
   # Read-only SQL through the database container's local socket.
   # default_transaction_read_only makes any accidental write fail.
-  local sql="$1" user db
+  local sql="$1" timeout_ms="${2:-30000}" user db
   user="$(_db_env POSTGRES_USER)"; db="$(_db_env POSTGRES_DB)"
   [[ -n "$user" && -n "$db" ]] || return 1
-  dk exec -e PGOPTIONS='-c default_transaction_read_only=on -c statement_timeout=30000' \
+  dk exec -e PGOPTIONS="-c default_transaction_read_only=on -c statement_timeout=${timeout_ms}" \
     "$TRINITY_DB_CONTAINER" psql -X -At -v ON_ERROR_STOP=1 -U "$user" -d "$db" -c "$sql"
 }
 
@@ -207,6 +207,11 @@ PY
       stat -c '%n mode=%a owner=%U:%G size=%s modified=%y' "$f" 2>/dev/null
     done
   } >"$raw/secret-files.txt"
+  local -a dsn_files=()
+  for f in "$TRINITY_ROOT"/secrets/*database_url* /etc/blackwell/*database-url*; do
+    [[ -r "$f" ]] && dsn_files+=("$f")
+  done
+  ((${#dsn_files[@]})) && "$PYTHON" "$HELPER" dsn-role "${dsn_files[@]}" >"$raw/dsn-roles.txt"
   if [[ -f "$TRINITY_ROOT/.env" ]]; then
     sed -n 's/^[[:space:]]*\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$TRINITY_ROOT/.env" | sort -u >"$raw/env-keys.txt"
   fi

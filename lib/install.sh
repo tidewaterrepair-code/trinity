@@ -85,7 +85,7 @@ _wait_healthy() {
   local c="$1" tries="${2:-90}" s i
   for ((i = 0; i < tries; i++)); do
     s="$(dk container inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}-nohealthcheck{{end}}' "$c" 2>/dev/null || echo missing)"
-    case "$s" in healthy|running-nohealthcheck) return 0 ;; unhealthy|exited*|dead*) return 1 ;; esac
+    case "$s" in healthy|running-nohealthcheck) return 0 ;; unhealthy|dead*) return 1 ;; esac
     sleep 2
   done
   return 1
@@ -318,6 +318,9 @@ install_run() {
     for svc in "${INSTALL_START_ORDER[@]}"; do
       _install_skipped "$svc" && { warn "NOT STARTED (skipped by TRINITY_INSTALL_SKIP): $svc"; continue; }
       compose_safe up -d --no-deps "$svc" || { failed+=("$svc"); continue; }
+      # web's nginx resolves the Edge hostname at start (set_real_ip_from), and Edge
+      # waits for web; on a fresh host web is checked after Edge exists.
+      [[ "$svc" == web ]] && continue
       _wait_healthy "blackwell-${svc//_/-}" 90 || failed+=("$svc")
     done
     # Edge: started only here, only because no Edge existed on this host.
@@ -326,6 +329,11 @@ install_run() {
     else
       dk compose --project-directory "$TRINITY_ROOT" -p "$TRINITY_COMPOSE_PROJECT" up -d --no-deps edge || failed+=(edge)
     fi
+    if ! _install_skipped web; then
+      # Restart policy brings web back once Edge resolves; allow for that.
+      _wait_healthy "$TRINITY_WEB_CONTAINER" 90 || { sleep 10; _wait_healthy "$TRINITY_WEB_CONTAINER" 60; } || failed+=(web)
+    fi
+    _wait_healthy "$TRINITY_EDGE_CONTAINER" 60 || failed+=(edge)
     if ((${#failed[@]})); then
       warn "services not healthy: ${failed[*]} (see: docker logs <container>)"
     else

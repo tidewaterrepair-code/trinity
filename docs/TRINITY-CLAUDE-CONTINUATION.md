@@ -29,7 +29,8 @@ Written 2026-10-04. Read with the complete-build continuation map and
    proves whether fresh and upgraded schemas produce identical profiles.
    Sandbox result: fresh chain vs 0048→0051 upgrade give **identical** migration-created grants.
 2. The DSN-file→role mapping in `lib/install.sh` (`INSTALL_ROLE_FILES`) is derived from
-   compose variable names. Confirm it against `db-sessions.txt` in a real discovery run.
+   compose variable names. A real discovery run lists the role each production DSN file
+   uses (`dsn-roles.txt`, role names only); confirm the mapping against it.
 3. `repository_ingestor` (apt) and `embedder` (Hugging Face model bake) could not be built in
    the sandbox because those hosts are blocked by the sandbox egress policy. They are not
    installer defects, but their builds are unproven here.

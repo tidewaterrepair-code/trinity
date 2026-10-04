@@ -107,5 +107,19 @@ class SanitizeInspect(unittest.TestCase):
         self.assertEqual(h.scan_text(out), [])
 
 
+class DsnRole(unittest.TestCase):
+    def test_reports_role_never_password(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = pathlib.Path(d) / "db-url"
+            f.write_text("postgresql://blackwell_runtime:VerySecretPw123@postgres:5432/blackwell\n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                h.main(["dsn-role", str(f)])
+        out = buf.getvalue()
+        self.assertIn("role=blackwell_runtime", out)
+        self.assertNotIn("VerySecretPw123", out)
+        self.assertEqual(h.scan_text(out), [])
+
+
 if __name__ == "__main__":
     unittest.main()

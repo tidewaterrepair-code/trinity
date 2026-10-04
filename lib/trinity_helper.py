@@ -54,6 +54,20 @@ def _env_names(env):
     return sorted(out)
 
 
+def cmd_dsn_role(args: argparse.Namespace) -> int:
+    """Print only the role (username) a DSN file authenticates as. Never the password."""
+    from urllib.parse import urlsplit
+
+    for name in args.files:
+        try:
+            text = pathlib.Path(name).read_text().strip()
+            user = urlsplit(text).username if "://" in text else None
+        except (OSError, ValueError):
+            user = None
+        print(f"{name} role={user or 'unparsed'}")
+    return 0
+
+
 def cmd_sanitize_inspect(args: argparse.Namespace) -> int:
     """Reduce `docker inspect` output to identity facts. Env values are dropped."""
     data = json.load(sys.stdin)
@@ -299,6 +313,12 @@ def cmd_assemble(args: argparse.Namespace) -> int:
         for line in exposure if isinstance(exposure, list) else [exposure]:
             lines.append(f"  {line}")
 
+    dsn_roles = manifest.get("dsn_roles") or []
+    if dsn_roles:
+        section("Service database identities (from DSN files; role names only)")
+        for line in dsn_roles if isinstance(dsn_roles, list) else [dsn_roles]:
+            lines.append(f"  {line}")
+
     secrets = manifest.get("secret_files") or []
     if secrets:
         section("Secret files (metadata only)")
@@ -349,6 +369,10 @@ def main(argv=None) -> int:
     p = sub.add_parser("scan-secrets")
     p.add_argument("files", nargs="+")
     p.set_defaults(fn=cmd_scan_secrets)
+
+    p = sub.add_parser("dsn-role")
+    p.add_argument("files", nargs="+")
+    p.set_defaults(fn=cmd_dsn_role)
 
     p = sub.add_parser("sanitize-inspect")
     p.set_defaults(fn=cmd_sanitize_inspect)

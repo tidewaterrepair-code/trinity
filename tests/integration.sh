@@ -122,7 +122,7 @@ docker exec trinity-old-prod pg_dump -U blackwell -d blackwell -Fc >"$work/bk/db
 docker exec trinity-old-prod pg_dumpall -U blackwell --roles-only --no-role-passwords >"$work/bk/db/roles.sql"
 docker exec trinity-old-prod psql -X -At -U blackwell -d blackwell -c "select version from blackwell.schema_migrations order by version" >"$work/bk/db/ledger.txt"
 docker rm -f trinity-old-prod >/dev/null
-(cd "$work/bk" && find . -type f -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
+(cd "$work/bk" && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum >SHA256SUMS)
 "$T" stage --ref "$REF" --backup "$work/bk" >"$work/stage.log" 2>&1 || { tail -20 "$work/stage.log"; fail "stage"; }
 rep="$(ls -d "$STATE"/stage/* | tail -1)/REPORT.md"
 grep -q 'upgrade proof: PASS from ledger 0048, applied 3 file(s)' "$rep" || fail "upgrade proof"

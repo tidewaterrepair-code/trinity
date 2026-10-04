@@ -61,6 +61,9 @@ ui_preserve() {
   local root stamp snap image_id image_ref tag
   root="$(_ui_root)"; stamp="$(utc_stamp)"; snap="$root/$stamp${label:+-$label}"
   umask 077
+  mkdir -p "$root"
+  local avail; avail="$(df -PB1 "$root" | awk 'NR==2{print $4}')"
+  ((avail > 1024 * 1024 * 1024)) || die "less than 1 GiB free at $root; not writing a UI snapshot (a full disk can stop production services)"
   mkdir -p "$snap/served" "$snap/source"
   log "UI snapshot: $snap"
 
